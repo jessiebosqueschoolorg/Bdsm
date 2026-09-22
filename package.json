@@ -1,0 +1,16 @@
+{
+  "name": "mistress-scarlett-intake",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Submissive intake form backend with Gmail verification and Telegram delivery",
+  "license": "MIT",
+  "author": "Mistress Scarlett",
+  "main": "serve.js",
+  "scripts": {
+    "start": "node serve.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "dotenv": "^16.4.5"
+  }
+}
